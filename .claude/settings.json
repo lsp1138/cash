@@ -1,0 +1,11 @@
+{
+  "projectName": "cash",
+  "description": "A git-style time tracking CLI for freelancers. Tracks hours, manages projects & customers, generates PDF invoices.",
+  "notes": [
+    "Data stored in ~/.cash/cash.db (SQLite via modernc.org/sqlite)",
+    "PDF invoices written to ~/.cash/invoices/",
+    "User config (invoice FROM section) in ~/.cash/config.json",
+    "Run 'go test ./...' to execute all unit tests",
+    "Build with 'go build -o cash .' then move binary to PATH"
+  ]
+}
