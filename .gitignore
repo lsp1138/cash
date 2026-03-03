@@ -2,3 +2,5 @@ cash
 cash.exe
 *.test
 coverage.out
+.gopath/
+.gocache/
