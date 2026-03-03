@@ -23,6 +23,7 @@ var (
 	custAddress  string
 	custRate     float64
 	custCurrency string
+	custSlug     string
 )
 
 var customerAddCmd = &cobra.Command{
@@ -50,6 +51,7 @@ Example:
 
 		c := models.Customer{
 			Name:       args[0],
+			Slug:       custSlug,
 			Email:      custEmail,
 			Address:    custAddress,
 			HourlyRate: custRate,
@@ -86,15 +88,15 @@ var customerListCmd = &cobra.Command{
 			return nil
 		}
 
-		fmt.Printf("%-4s  %-24s  %-28s  %8s  %s\n", "ID", "Name", "Email", "Rate", "Currency")
-		fmt.Println(strings.Repeat("─", 75))
+		fmt.Printf("%-4s  %-24s  %-20s  %-24s  %8s  %s\n", "ID", "Name", "Slug", "Email", "Rate", "Currency")
+		fmt.Println(strings.Repeat("─", 95))
 		for _, c := range customers {
 			rate := "-"
 			if c.HourlyRate > 0 {
 				rate = fmt.Sprintf("%.2f", c.HourlyRate)
 			}
-			fmt.Printf("%-4d  %-24s  %-28s  %8s  %s\n",
-				c.ID, c.Name, c.Email, rate, c.Currency)
+			fmt.Printf("%-4d  %-24s  %-20s  %-24s  %8s  %s\n",
+				c.ID, c.Name, c.Slug, c.Email, rate, c.Currency)
 		}
 		return nil
 	},
@@ -103,8 +105,8 @@ var customerListCmd = &cobra.Command{
 // ── customer show ─────────────────────────────────────────────────────────────
 
 var customerShowCmd = &cobra.Command{
-	Use:   "show <name>",
-	Short: "Show customer details and their projects",
+	Use:   "show <slug-or-name>",
+	Short: "Show customer details and their projects by slug or name",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		d, err := db.Open()
@@ -113,7 +115,7 @@ var customerShowCmd = &cobra.Command{
 		}
 		defer d.Close()
 
-		c, err := d.GetCustomerByName(args[0])
+		c, err := d.GetCustomerBySlugOrName(args[0])
 		if err != nil {
 			return err
 		}
@@ -122,6 +124,7 @@ var customerShowCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Customer  : %s\n", c.Name)
+		fmt.Printf("Slug      : %s\n", c.Slug)
 		fmt.Printf("Email     : %s\n", c.Email)
 		fmt.Printf("Address   : %s\n", c.Address)
 		if c.HourlyRate > 0 {
@@ -158,11 +161,12 @@ var (
 	editAddress  string
 	editRate     float64
 	editCurrency string
+	editSlug     string
 )
 
 var customerEditCmd = &cobra.Command{
-	Use:   "edit <name>",
-	Short: "Edit an existing customer",
+	Use:   "edit <slug-or-name>",
+	Short: "Edit an existing customer by slug or name",
 	Long: `Update a customer's details. Only provide the flags you want to change.
 
 Example:
@@ -175,7 +179,7 @@ Example:
 		}
 		defer d.Close()
 
-		c, err := d.GetCustomerByName(args[0])
+		c, err := d.GetCustomerBySlugOrName(args[0])
 		if err != nil {
 			return err
 		}
@@ -194,6 +198,9 @@ Example:
 		}
 		if cmd.Flags().Changed("currency") {
 			c.Currency = editCurrency
+		}
+		if cmd.Flags().Changed("slug") {
+			c.Slug = editSlug
 		}
 
 		if err := d.UpdateCustomer(*c); err != nil {
@@ -214,9 +221,11 @@ func init() {
 	customerAddCmd.Flags().StringVar(&custAddress, "address", "", "Postal address")
 	customerAddCmd.Flags().Float64Var(&custRate, "rate", 0, "Hourly rate")
 	customerAddCmd.Flags().StringVar(&custCurrency, "currency", "USD", "Currency code (USD, EUR, GBP…)")
+	customerAddCmd.Flags().StringVar(&custSlug, "slug", "", "Customer slug (default: auto-generated from name)")
 
 	customerEditCmd.Flags().StringVar(&editEmail, "email", "", "New email")
 	customerEditCmd.Flags().StringVar(&editAddress, "address", "", "New address")
 	customerEditCmd.Flags().Float64Var(&editRate, "rate", 0, "New hourly rate")
 	customerEditCmd.Flags().StringVar(&editCurrency, "currency", "", "New currency code")
+	customerEditCmd.Flags().StringVar(&editSlug, "slug", "", "New customer slug")
 }

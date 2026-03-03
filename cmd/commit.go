@@ -44,6 +44,7 @@ Examples:
 			Hours:       hours,
 			Message:     commitMsg,
 			Subservice:  commitSubservice,
+			Billable:    true,
 			CommittedAt: now,
 		}
 		if _, err := d.AddTimeEntry(entry); err != nil {

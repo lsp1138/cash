@@ -50,7 +50,7 @@ Examples:
 		}
 
 		if projCustomer != "" {
-			c, err := d.GetCustomerByName(projCustomer)
+			c, err := d.GetCustomerBySlugOrName(projCustomer)
 			if err != nil {
 				return err
 			}
@@ -169,7 +169,7 @@ func init() {
 	projectCmd.AddCommand(projectListCmd)
 	projectCmd.AddCommand(projectShowCmd)
 
-	projectAddCmd.Flags().StringVar(&projCustomer, "customer", "", "Customer name to link to")
+	projectAddCmd.Flags().StringVar(&projCustomer, "customer", "", "Customer slug or name to link to")
 	projectAddCmd.Flags().Float64Var(&projRate, "rate", 0, "Override hourly rate for this project")
 	projectAddCmd.Flags().StringVar(&projDesc, "desc", "", "Project description")
 }

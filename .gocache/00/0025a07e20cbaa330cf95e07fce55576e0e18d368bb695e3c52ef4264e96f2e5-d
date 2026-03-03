@@ -1,0 +1,12 @@
+./commit.go
+./config.go
+./customer.go
+./invoice.go
+./log.go
+./project.go
+./report.go
+./root.go
+./start.go
+./status.go
+./stop.go
+./week.go

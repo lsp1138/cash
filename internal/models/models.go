@@ -6,6 +6,7 @@ import "time"
 type Customer struct {
 	ID         int64
 	Name       string
+	Slug       string
 	Email      string
 	Address    string
 	HourlyRate float64
@@ -41,6 +42,8 @@ func (p *Project) EffectiveRate() (float64, string) {
 
 // TimeEntry represents a recorded block of work.
 type TimeEntry struct {
+	Billable    bool       // true = billable, false = non-billable
+	InvoiceID   *int64     // set when linked to an invoice
 	ID          int64
 	ProjectName string
 	Hours       float64
@@ -61,6 +64,7 @@ type Timer struct {
 
 // Invoice represents a billing document for a customer.
 type Invoice struct {
+	PaidAt        *time.Time
 	ID            int64
 	CustomerID    int64
 	InvoiceNumber string

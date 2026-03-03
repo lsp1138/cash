@@ -64,7 +64,7 @@ Example:
 		}
 		defer d.Close()
 
-		customer, err := d.GetCustomerByName(invCustomer)
+		customer, err := d.GetCustomerBySlugOrName(invCustomer)
 		if err != nil {
 			return err
 		}
@@ -276,7 +276,7 @@ func init() {
 	invoiceCmd.AddCommand(invoiceListCmd)
 	invoiceCmd.AddCommand(invoiceShowCmd)
 
-	invoiceGenerateCmd.Flags().StringVar(&invCustomer, "customer", "", "Customer name (required)")
+	invoiceGenerateCmd.Flags().StringVar(&invCustomer, "customer", "", "Customer slug or name (required)")
 	invoiceGenerateCmd.Flags().StringVar(&invFrom, "from", "", "Period start date YYYY-MM-DD (required)")
 	invoiceGenerateCmd.Flags().StringVar(&invTo, "to", "", "Period end date YYYY-MM-DD (required)")
 	invoiceGenerateCmd.Flags().StringVar(&invNumber, "number", "", "Invoice number (auto-generated if omitted)")

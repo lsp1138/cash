@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 
@@ -61,10 +63,22 @@ func openAt(path string) (*DB, error) {
 func (d *DB) Close() error { return d.conn.Close() }
 
 func (d *DB) migrate() error {
+	// Run additive ALTER TABLE migrations safely
+	alterations := []string{
+		`ALTER TABLE time_entries ADD COLUMN billable   INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE time_entries ADD COLUMN invoice_id INTEGER REFERENCES invoices(id)`,
+		`ALTER TABLE invoices     ADD COLUMN paid_at    DATETIME`,
+		`ALTER TABLE customers    ADD COLUMN slug       TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, alt := range alterations {
+		d.conn.Exec(alt) // ignore "duplicate column" errors
+	}
+
 	_, err := d.conn.Exec(`
 	CREATE TABLE IF NOT EXISTS customers (
 		id          INTEGER PRIMARY KEY AUTOINCREMENT,
 		name        TEXT    NOT NULL UNIQUE,
+		slug        TEXT    NOT NULL UNIQUE,
 		email       TEXT    NOT NULL DEFAULT '',
 		address     TEXT    NOT NULL DEFAULT '',
 		hourly_rate REAL    NOT NULL DEFAULT 0,
@@ -85,6 +99,8 @@ func (d *DB) migrate() error {
 		hours        REAL    NOT NULL,
 		message      TEXT    NOT NULL DEFAULT '',
 		subservice   TEXT    NOT NULL DEFAULT '',
+		billable     INTEGER NOT NULL DEFAULT 1,
+		invoice_id   INTEGER REFERENCES invoices(id),
 		start_time   DATETIME,
 		end_time     DATETIME,
 		committed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -105,10 +121,18 @@ func (d *DB) migrate() error {
 		total_amount   REAL     NOT NULL DEFAULT 0,
 		currency       TEXT     NOT NULL DEFAULT 'USD',
 		status         TEXT     NOT NULL DEFAULT 'draft',
+		paid_at        DATETIME,
 		pdf_path       TEXT     NOT NULL DEFAULT '',
 		created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	`)
+	if err != nil {
+		return err
+	}
+	if err := d.ensureCustomerSlugs(); err != nil {
+		return err
+	}
+	_, err = d.conn.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_slug_lower_unique ON customers(LOWER(slug));`)
 	return err
 }
 
@@ -116,11 +140,16 @@ func (d *DB) migrate() error {
 
 // AddTimeEntry inserts an entry and returns its new ID.
 func (d *DB) AddTimeEntry(e models.TimeEntry) (int64, error) {
+	billable := 1
+	if !e.Billable {
+		billable = 0
+	}
 	res, err := d.conn.Exec(
 		`INSERT INTO time_entries
-		 (project_name, hours, message, subservice, start_time, end_time, committed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		 (project_name, hours, message, subservice, billable, invoice_id, start_time, end_time, committed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ProjectName, e.Hours, e.Message, e.Subservice,
+		billable, optInt64(e.InvoiceID),
 		optTime(e.StartTime), optTime(e.EndTime), e.CommittedAt.Format(time.RFC3339),
 	)
 	if err != nil {
@@ -131,7 +160,7 @@ func (d *DB) AddTimeEntry(e models.TimeEntry) (int64, error) {
 
 // GetTimeEntries returns entries matching the filter, oldest first.
 func (d *DB) GetTimeEntries(f models.TimeEntryFilter) ([]models.TimeEntry, error) {
-	q := `SELECT id, project_name, hours, message, subservice, start_time, end_time, committed_at
+	q := `SELECT id, project_name, hours, message, subservice, billable, invoice_id, start_time, end_time, committed_at
 	      FROM time_entries WHERE 1=1`
 	var args []any
 
@@ -160,10 +189,16 @@ func (d *DB) GetTimeEntries(f models.TimeEntryFilter) ([]models.TimeEntry, error
 		var e models.TimeEntry
 		var st, et sql.NullString
 		var cat string
-		if err := rows.Scan(&e.ID, &e.ProjectName, &e.Hours, &e.Message, &e.Subservice, &st, &et, &cat); err != nil {
+		var billable int
+		var invoiceID sql.NullInt64
+		if err := rows.Scan(&e.ID, &e.ProjectName, &e.Hours, &e.Message, &e.Subservice, &billable, &invoiceID, &st, &et, &cat); err != nil {
 			return nil, err
 		}
 		e.CommittedAt = mustParseTime(cat)
+		e.Billable = billable == 1
+		if invoiceID.Valid {
+			e.InvoiceID = &invoiceID.Int64
+		}
 		if st.Valid {
 			t := mustParseTime(st.String)
 			e.StartTime = &t
@@ -217,9 +252,25 @@ func (d *DB) DeleteTimer(id int64) error {
 
 // AddCustomer inserts a customer and returns its ID.
 func (d *DB) AddCustomer(c models.Customer) (int64, error) {
+	if c.Slug == "" {
+		c.Slug = CustomerSlug(c.Name)
+	} else {
+		c.Slug = CustomerSlug(c.Slug)
+	}
+	if c.Slug == "" {
+		return 0, fmt.Errorf("customer slug cannot be empty")
+	}
+	existing, err := d.GetCustomerBySlug(c.Slug)
+	if err != nil {
+		return 0, err
+	}
+	if existing != nil {
+		return 0, fmt.Errorf("customer slug %q already exists", c.Slug)
+	}
+
 	res, err := d.conn.Exec(
-		`INSERT INTO customers (name, email, address, hourly_rate, currency) VALUES (?, ?, ?, ?, ?)`,
-		c.Name, c.Email, c.Address, c.HourlyRate, c.Currency,
+		`INSERT INTO customers (name, slug, email, address, hourly_rate, currency) VALUES (?, ?, ?, ?, ?, ?)`,
+		c.Name, c.Slug, c.Email, c.Address, c.HourlyRate, c.Currency,
 	)
 	if err != nil {
 		return 0, err
@@ -230,7 +281,7 @@ func (d *DB) AddCustomer(c models.Customer) (int64, error) {
 // GetCustomers returns all customers sorted by name.
 func (d *DB) GetCustomers() ([]models.Customer, error) {
 	rows, err := d.conn.Query(
-		`SELECT id, name, email, address, hourly_rate, currency, created_at FROM customers ORDER BY name`,
+		`SELECT id, name, slug, email, address, hourly_rate, currency, created_at FROM customers ORDER BY name`,
 	)
 	if err != nil {
 		return nil, err
@@ -240,7 +291,7 @@ func (d *DB) GetCustomers() ([]models.Customer, error) {
 	for rows.Next() {
 		var c models.Customer
 		var cat string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Email, &c.Address, &c.HourlyRate, &c.Currency, &cat); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Slug, &c.Email, &c.Address, &c.HourlyRate, &c.Currency, &cat); err != nil {
 			return nil, err
 		}
 		c.CreatedAt = mustParseTime(cat)
@@ -252,12 +303,12 @@ func (d *DB) GetCustomers() ([]models.Customer, error) {
 // GetCustomerByName finds a customer case-insensitively, returning nil if not found.
 func (d *DB) GetCustomerByName(name string) (*models.Customer, error) {
 	row := d.conn.QueryRow(
-		`SELECT id, name, email, address, hourly_rate, currency, created_at
+		`SELECT id, name, slug, email, address, hourly_rate, currency, created_at
 		 FROM customers WHERE LOWER(name) = LOWER(?)`, name,
 	)
 	var c models.Customer
 	var cat string
-	if err := row.Scan(&c.ID, &c.Name, &c.Email, &c.Address, &c.HourlyRate, &c.Currency, &cat); err == sql.ErrNoRows {
+	if err := row.Scan(&c.ID, &c.Name, &c.Slug, &c.Email, &c.Address, &c.HourlyRate, &c.Currency, &cat); err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
@@ -266,11 +317,60 @@ func (d *DB) GetCustomerByName(name string) (*models.Customer, error) {
 	return &c, nil
 }
 
-// UpdateCustomer saves changed email, address, rate, and currency by ID.
+// GetCustomerBySlug finds a customer by slug case-insensitively.
+func (d *DB) GetCustomerBySlug(slug string) (*models.Customer, error) {
+	row := d.conn.QueryRow(
+		`SELECT id, name, slug, email, address, hourly_rate, currency, created_at
+		 FROM customers WHERE LOWER(slug) = LOWER(?)`, slug,
+	)
+	var c models.Customer
+	var cat string
+	if err := row.Scan(&c.ID, &c.Name, &c.Slug, &c.Email, &c.Address, &c.HourlyRate, &c.Currency, &cat); err == sql.ErrNoRows {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	c.CreatedAt = mustParseTime(cat)
+	return &c, nil
+}
+
+// GetCustomerBySlugOrName finds a customer by slug first, then name.
+func (d *DB) GetCustomerBySlugOrName(lookup string) (*models.Customer, error) {
+	row := d.conn.QueryRow(
+		`SELECT id, name, slug, email, address, hourly_rate, currency, created_at
+		 FROM customers
+		 WHERE LOWER(slug) = LOWER(?) OR LOWER(name) = LOWER(?)
+		 ORDER BY CASE WHEN LOWER(slug) = LOWER(?) THEN 0 ELSE 1 END
+		 LIMIT 1`,
+		lookup, lookup, lookup,
+	)
+	var c models.Customer
+	var cat string
+	if err := row.Scan(&c.ID, &c.Name, &c.Slug, &c.Email, &c.Address, &c.HourlyRate, &c.Currency, &cat); err == sql.ErrNoRows {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	c.CreatedAt = mustParseTime(cat)
+	return &c, nil
+}
+
+// UpdateCustomer saves changed slug, email, address, rate, and currency by ID.
 func (d *DB) UpdateCustomer(c models.Customer) error {
-	_, err := d.conn.Exec(
-		`UPDATE customers SET email=?, address=?, hourly_rate=?, currency=? WHERE id=?`,
-		c.Email, c.Address, c.HourlyRate, c.Currency, c.ID,
+	c.Slug = CustomerSlug(c.Slug)
+	if c.Slug == "" {
+		return fmt.Errorf("customer slug cannot be empty")
+	}
+	existing, err := d.GetCustomerBySlug(c.Slug)
+	if err != nil {
+		return err
+	}
+	if existing != nil && existing.ID != c.ID {
+		return fmt.Errorf("customer slug %q already exists", c.Slug)
+	}
+	_, err = d.conn.Exec(
+		`UPDATE customers SET slug=?, email=?, address=?, hourly_rate=?, currency=? WHERE id=?`,
+		c.Slug, c.Email, c.Address, c.HourlyRate, c.Currency, c.ID,
 	)
 	return err
 }
@@ -293,7 +393,7 @@ func (d *DB) AddProject(p models.Project) (int64, error) {
 func (d *DB) GetProjects() ([]models.Project, error) {
 	rows, err := d.conn.Query(`
 		SELECT p.id, p.name, p.customer_id, p.description, p.hourly_rate, p.created_at,
-		       c.id, c.name, c.hourly_rate, c.currency
+		       c.id, c.name, c.slug, c.hourly_rate, c.currency
 		FROM projects p
 		LEFT JOIN customers c ON c.id = p.customer_id
 		ORDER BY p.name`)
@@ -308,10 +408,10 @@ func (d *DB) GetProjects() ([]models.Project, error) {
 		var hr sql.NullFloat64
 		var cat string
 		var ccid sql.NullInt64
-		var cname, ccur sql.NullString
+		var cname, cslug, ccur sql.NullString
 		var crate sql.NullFloat64
 		if err := rows.Scan(&p.ID, &p.Name, &cid, &p.Description, &hr, &cat,
-			&ccid, &cname, &crate, &ccur); err != nil {
+			&ccid, &cname, &cslug, &crate, &ccur); err != nil {
 			return nil, err
 		}
 		p.CreatedAt = mustParseTime(cat)
@@ -322,7 +422,7 @@ func (d *DB) GetProjects() ([]models.Project, error) {
 			p.HourlyRate = &hr.Float64
 		}
 		if ccid.Valid {
-			p.Customer = &models.Customer{ID: ccid.Int64, Name: cname.String, HourlyRate: crate.Float64, Currency: ccur.String}
+			p.Customer = &models.Customer{ID: ccid.Int64, Name: cname.String, Slug: cslug.String, HourlyRate: crate.Float64, Currency: ccur.String}
 		}
 		out = append(out, p)
 	}
@@ -333,7 +433,7 @@ func (d *DB) GetProjects() ([]models.Project, error) {
 func (d *DB) GetProjectByName(name string) (*models.Project, error) {
 	row := d.conn.QueryRow(`
 		SELECT p.id, p.name, p.customer_id, p.description, p.hourly_rate, p.created_at,
-		       c.id, c.name, c.email, c.address, c.hourly_rate, c.currency
+		       c.id, c.name, c.slug, c.email, c.address, c.hourly_rate, c.currency
 		FROM projects p
 		LEFT JOIN customers c ON c.id = p.customer_id
 		WHERE LOWER(p.name) = LOWER(?)`, name)
@@ -343,10 +443,10 @@ func (d *DB) GetProjectByName(name string) (*models.Project, error) {
 	var hr sql.NullFloat64
 	var cat string
 	var ccid sql.NullInt64
-	var cname, cemail, caddr, ccur sql.NullString
+	var cname, cslug, cemail, caddr, ccur sql.NullString
 	var crate sql.NullFloat64
 	if err := row.Scan(&p.ID, &p.Name, &cid, &p.Description, &hr, &cat,
-		&ccid, &cname, &cemail, &caddr, &crate, &ccur); err == sql.ErrNoRows {
+		&ccid, &cname, &cslug, &cemail, &caddr, &crate, &ccur); err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
@@ -360,7 +460,7 @@ func (d *DB) GetProjectByName(name string) (*models.Project, error) {
 	}
 	if ccid.Valid {
 		p.Customer = &models.Customer{
-			ID: ccid.Int64, Name: cname.String, Email: cemail.String,
+			ID: ccid.Int64, Name: cname.String, Slug: cslug.String, Email: cemail.String,
 			Address: caddr.String, HourlyRate: crate.Float64, Currency: ccur.String,
 		}
 	}
@@ -440,7 +540,7 @@ func (d *DB) GetInvoices() ([]models.Invoice, error) {
 	rows, err := d.conn.Query(`
 		SELECT i.id, i.customer_id, i.invoice_number, i.period_start, i.period_end,
 		       i.total_hours, i.total_amount, i.currency, i.status, i.pdf_path, i.created_at,
-		       c.name, c.email
+		       c.name, c.slug, c.email
 		FROM invoices i
 		JOIN customers c ON c.id = i.customer_id
 		ORDER BY i.created_at DESC`)
@@ -451,19 +551,19 @@ func (d *DB) GetInvoices() ([]models.Invoice, error) {
 	var out []models.Invoice
 	for rows.Next() {
 		var inv models.Invoice
-		var ps, pe, cat, cname, cemail string
+		var ps, pe, cat, cname, cslug, cemail string
 		if err := rows.Scan(
 			&inv.ID, &inv.CustomerID, &inv.InvoiceNumber,
 			&ps, &pe, &inv.TotalHours, &inv.TotalAmount,
 			&inv.Currency, &inv.Status, &inv.PDFPath, &cat,
-			&cname, &cemail,
+			&cname, &cslug, &cemail,
 		); err != nil {
 			return nil, err
 		}
 		inv.PeriodStart = mustParseDate(ps)
 		inv.PeriodEnd = mustParseDate(pe)
 		inv.CreatedAt = mustParseTime(cat)
-		inv.Customer = &models.Customer{Name: cname, Email: cemail}
+		inv.Customer = &models.Customer{Name: cname, Slug: cslug, Email: cemail}
 		out = append(out, inv)
 	}
 	return out, rows.Err()
@@ -474,20 +574,20 @@ func (d *DB) GetInvoiceByNumber(number string) (*models.Invoice, error) {
 	row := d.conn.QueryRow(`
 		SELECT i.id, i.customer_id, i.invoice_number, i.period_start, i.period_end,
 		       i.total_hours, i.total_amount, i.currency, i.status, i.pdf_path, i.created_at,
-		       c.id, c.name, c.email, c.address, c.hourly_rate, c.currency
+		       c.id, c.name, c.slug, c.email, c.address, c.hourly_rate, c.currency
 		FROM invoices i
 		JOIN customers c ON c.id = i.customer_id
 		WHERE i.invoice_number = ?`, number)
 	var inv models.Invoice
 	var ps, pe, cat string
 	var cid int64
-	var cname, cemail, caddr, ccur string
+	var cname, cslug, cemail, caddr, ccur string
 	var crate float64
 	if err := row.Scan(
 		&inv.ID, &inv.CustomerID, &inv.InvoiceNumber,
 		&ps, &pe, &inv.TotalHours, &inv.TotalAmount,
 		&inv.Currency, &inv.Status, &inv.PDFPath, &cat,
-		&cid, &cname, &cemail, &caddr, &crate, &ccur,
+		&cid, &cname, &cslug, &cemail, &caddr, &crate, &ccur,
 	); err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {
@@ -497,10 +597,76 @@ func (d *DB) GetInvoiceByNumber(number string) (*models.Invoice, error) {
 	inv.PeriodEnd = mustParseDate(pe)
 	inv.CreatedAt = mustParseTime(cat)
 	inv.Customer = &models.Customer{
-		ID: cid, Name: cname, Email: cemail,
+		ID: cid, Name: cname, Slug: cslug, Email: cemail,
 		Address: caddr, HourlyRate: crate, Currency: ccur,
 	}
 	return &inv, nil
+}
+
+func (d *DB) ensureCustomerSlugs() error {
+	rows, err := d.conn.Query(`SELECT id, name, slug FROM customers ORDER BY id ASC`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type customerRow struct {
+		id   int64
+		name string
+		slug string
+	}
+	var customers []customerRow
+	used := map[string]bool{}
+	for rows.Next() {
+		var c customerRow
+		if err := rows.Scan(&c.id, &c.name, &c.slug); err != nil {
+			return err
+		}
+		customers = append(customers, c)
+		if strings.TrimSpace(c.slug) != "" {
+			used[strings.ToLower(c.slug)] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, c := range customers {
+		if strings.TrimSpace(c.slug) != "" {
+			continue
+		}
+		base := CustomerSlug(c.name)
+		if base == "" {
+			base = "customer"
+		}
+		slug := base
+		for i := 2; used[strings.ToLower(slug)]; i++ {
+			slug = base + "_" + strconv.Itoa(i)
+		}
+		used[strings.ToLower(slug)] = true
+		if _, err := d.conn.Exec(`UPDATE customers SET slug = ? WHERE id = ?`, slug, c.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CustomerSlug normalizes a customer slug to lowercase words joined by underscores.
+func CustomerSlug(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+			b.WriteRune(r)
+		case unicode.IsSpace(r), r == '_':
+			b.WriteByte(' ')
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), "_")
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

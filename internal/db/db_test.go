@@ -156,6 +156,64 @@ func TestCustomerNotFound(t *testing.T) {
 	}
 }
 
+func TestCustomerSlugGenerationAndLookup(t *testing.T) {
+	d := openTest(t)
+
+	id, err := d.AddCustomer(models.Customer{Name: "Acme & Sons, Inc."})
+	if err != nil {
+		t.Fatalf("AddCustomer: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("expected non-zero id")
+	}
+
+	byName, err := d.GetCustomerByName("Acme & Sons, Inc.")
+	if err != nil {
+		t.Fatalf("GetCustomerByName: %v", err)
+	}
+	if byName == nil {
+		t.Fatal("expected customer by name")
+	}
+	if byName.Slug != "acme_sons_inc" {
+		t.Fatalf("slug: got %q, want %q", byName.Slug, "acme_sons_inc")
+	}
+
+	byLookupSlug, err := d.GetCustomerBySlugOrName("acme_sons_inc")
+	if err != nil {
+		t.Fatalf("GetCustomerBySlugOrName(slug): %v", err)
+	}
+	if byLookupSlug == nil || byLookupSlug.ID != byName.ID {
+		t.Fatal("expected slug lookup to match customer")
+	}
+
+	byLookupName, err := d.GetCustomerBySlugOrName("Acme & Sons, Inc.")
+	if err != nil {
+		t.Fatalf("GetCustomerBySlugOrName(name): %v", err)
+	}
+	if byLookupName == nil || byLookupName.ID != byName.ID {
+		t.Fatal("expected name lookup to match customer")
+	}
+}
+
+func TestCustomerSlugManualValueNormalized(t *testing.T) {
+	d := openTest(t)
+
+	_, err := d.AddCustomer(models.Customer{Name: "Beta Co", Slug: "  Beta! Co + 2026  "})
+	if err != nil {
+		t.Fatalf("AddCustomer: %v", err)
+	}
+	c, err := d.GetCustomerByName("Beta Co")
+	if err != nil {
+		t.Fatalf("GetCustomerByName: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected customer")
+	}
+	if c.Slug != "beta_co_2026" {
+		t.Fatalf("slug: got %q, want %q", c.Slug, "beta_co_2026")
+	}
+}
+
 func TestProjectCRUD(t *testing.T) {
 	d := openTest(t)
 

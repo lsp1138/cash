@@ -44,6 +44,23 @@ type MonthData struct {
 	TotalRevenue float64
 }
 
+// MonthSummary holds totals for one month.
+type MonthSummary struct {
+	Month        time.Time
+	TotalHours   float64
+	TotalRevenue float64
+}
+
+// YearData holds aggregated data for a multi-month range in a given year.
+type YearData struct {
+	From         time.Time
+	To           time.Time // exclusive
+	Months       []MonthSummary
+	Projects     []ProjectSummary
+	TotalHours   float64
+	TotalRevenue float64
+}
+
 // WeekStart returns the Monday of the ISO week that contains t.
 func WeekStart(t time.Time) time.Time {
 	t = t.Truncate(24 * time.Hour)
@@ -62,6 +79,16 @@ func MonthStart(t time.Time) time.Time {
 // MonthEnd returns midnight on the first day of the following month.
 func MonthEnd(t time.Time) time.Time {
 	return MonthStart(t).AddDate(0, 1, 0)
+}
+
+// YearStart returns midnight on January 1st of t's year.
+func YearStart(t time.Time) time.Time {
+	return time.Date(t.Year(), time.January, 1, 0, 0, 0, 0, t.Location())
+}
+
+// YearEnd returns midnight on January 1st of the next year.
+func YearEnd(t time.Time) time.Time {
+	return YearStart(t).AddDate(1, 0, 0)
 }
 
 // DayIndex maps Go's weekday to Mon=0 … Sun=6.
@@ -167,6 +194,73 @@ func BuildMonth(entries []models.TimeEntry, projectMap map[string]*models.Projec
 	}
 
 	return md
+}
+
+// BuildYear aggregates entries into a full calendar year.
+func BuildYear(entries []models.TimeEntry, projectMap map[string]*models.Project, target time.Time) YearData {
+	return BuildYearRange(entries, projectMap, YearStart(target), YearEnd(target))
+}
+
+// BuildYTD aggregates entries from Jan 1 through target day (inclusive).
+func BuildYTD(entries []models.TimeEntry, projectMap map[string]*models.Project, target time.Time) YearData {
+	start := YearStart(target)
+	end := time.Date(target.Year(), target.Month(), target.Day(), 0, 0, 0, 0, target.Location()).AddDate(0, 0, 1)
+	return BuildYearRange(entries, projectMap, start, end)
+}
+
+// BuildYearRange aggregates entries in [from, to) with per-month and per-project totals.
+func BuildYearRange(entries []models.TimeEntry, projectMap map[string]*models.Project, from, to time.Time) YearData {
+	yd := YearData{
+		From: from,
+		To:   to,
+	}
+	month := MonthStart(from)
+	for month.Before(to) {
+		next := month.AddDate(0, 1, 0)
+		if next.After(to) {
+			next = to
+		}
+		totalHours := 0.0
+		totalRevenue := 0.0
+		for _, e := range entries {
+			if !e.CommittedAt.Before(month) && e.CommittedAt.Before(next) {
+				totalHours += e.Hours
+				rate, _ := projectRate(e.ProjectName, projectMap)
+				totalRevenue += e.Hours * rate
+			}
+		}
+		if totalHours > 0 {
+			yd.Months = append(yd.Months, MonthSummary{
+				Month:        month,
+				TotalHours:   totalHours,
+				TotalRevenue: totalRevenue,
+			})
+		}
+		month = month.AddDate(0, 1, 0)
+	}
+
+	projectHours := make(map[string]float64)
+	seen := make(map[string]bool)
+	var order []string
+	for _, e := range entries {
+		projectHours[e.ProjectName] += e.Hours
+		yd.TotalHours += e.Hours
+		if !seen[e.ProjectName] {
+			seen[e.ProjectName] = true
+			order = append(order, e.ProjectName)
+		}
+	}
+	for _, name := range order {
+		hours := projectHours[name]
+		rate, currency := projectRate(name, projectMap)
+		revenue := hours * rate
+		yd.Projects = append(yd.Projects, ProjectSummary{
+			Name: name, Hours: hours, Revenue: revenue, Rate: rate, Currency: currency,
+		})
+		yd.TotalRevenue += revenue
+	}
+
+	return yd
 }
 
 func projectRate(name string, pm map[string]*models.Project) (float64, string) {
