@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -14,6 +15,7 @@ import (
 var (
 	commitMsg        string
 	commitSubservice string
+	commitDate       string
 )
 
 var commitCmd = &cobra.Command{
@@ -23,7 +25,9 @@ var commitCmd = &cobra.Command{
 
 Examples:
   cash commit web_app 3 -m "Implemented login page"
-  cash commit api 1.5 -m "Fixed auth bug" -s "backend"`,
+  cash commit api 1.5 -m "Fixed auth bug" -s "backend"
+  cash commit api 2 -d yesterday -m "Forgot to log"
+  cash commit api 1 -d 2026-03-01 -m "Backfill entry"`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		project := args[0]
@@ -39,19 +43,32 @@ Examples:
 		defer d.Close()
 
 		now := time.Now()
+		commitTime := now
+		if commitDate != "" {
+			switch strings.ToLower(commitDate) {
+			case "yesterday":
+				commitTime = now.AddDate(0, 0, -1)
+			default:
+				parsed, err := time.ParseInLocation("2006-01-02", commitDate, now.Location())
+				if err != nil {
+					return fmt.Errorf("invalid date %q: use YYYY-MM-DD or 'yesterday'", commitDate)
+				}
+				commitTime = parsed.Add(12 * time.Hour) // noon on that day
+			}
+		}
 		entry := models.TimeEntry{
 			ProjectName: project,
 			Hours:       hours,
 			Message:     commitMsg,
 			Subservice:  commitSubservice,
 			Billable:    true,
-			CommittedAt: now,
+			CommittedAt: commitTime,
 		}
 		if _, err := d.AddTimeEntry(entry); err != nil {
 			return fmt.Errorf("saving entry: %w", err)
 		}
 
-		fmt.Printf("[%s] %.2fh → %s\n", now.Format("2006-01-02 15:04"), hours, project)
+		fmt.Printf("[%s] %.2fh → %s\n", commitTime.Format("2006-01-02 15:04"), hours, project)
 		if commitMsg != "" {
 			fmt.Printf("    %s\n", commitMsg)
 		}
@@ -65,4 +82,5 @@ Examples:
 func init() {
 	commitCmd.Flags().StringVarP(&commitMsg, "message", "m", "", "Description of work done")
 	commitCmd.Flags().StringVarP(&commitSubservice, "subservice", "s", "", "Sub-category or service type")
+	commitCmd.Flags().StringVarP(&commitDate, "date", "d", "", "Date for the entry (YYYY-MM-DD or 'yesterday')")
 }
