@@ -73,7 +73,7 @@ Examples:
 			fmt.Printf("    %s\n", commitMsg)
 		}
 		if commitSubservice != "" {
-			fmt.Printf("    category: %s\n", commitSubservice)
+			fmt.Printf("    service: %s\n", commitSubservice)
 		}
 		return nil
 	},
@@ -81,6 +81,9 @@ Examples:
 
 func init() {
 	commitCmd.Flags().StringVarP(&commitMsg, "message", "m", "", "Description of work done")
-	commitCmd.Flags().StringVarP(&commitSubservice, "subservice", "s", "", "Sub-category or service type")
+	commitCmd.Flags().StringVarP(&commitSubservice, "service", "s", "", "Service type")
+	commitCmd.Flags().StringVar(&commitSubservice, "subservice", "", "Deprecated alias for --service")
 	commitCmd.Flags().StringVarP(&commitDate, "date", "d", "", "Date for the entry (YYYY-MM-DD or 'yesterday')")
+	_ = commitCmd.Flags().MarkDeprecated("subservice", "use --service instead")
+	_ = commitCmd.Flags().MarkHidden("subservice")
 }

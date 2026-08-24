@@ -55,6 +55,7 @@ Examples:
 			ProjectName: timer.ProjectName,
 			Hours:       hours,
 			Message:     message,
+			Billable:    true,
 			StartTime:   &timer.StartedAt,
 			EndTime:     &now,
 			CommittedAt: now,
