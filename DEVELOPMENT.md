@@ -39,10 +39,59 @@ confirmation for destructive operations.
   open.
 - Create a timestamped backup before invoice creation, cancellation, migrations,
   and other material changes.
-- Store daily backups in a second private or synced location, not only under
-  `~/.cash` on the same disk.
-- Retain multiple generations and periodically test restoring one.
-- Keep final sent invoice PDFs in the backup location as well.
+- Add a `cash backup` command that creates a complete, restorable snapshot in a
+  staging directory before publishing it to the configured backup destination.
+- Support a configurable destination such as `CASH_BACKUP_DIR`. For Sam's local
+  setup, this can point to a private Google Drive folder dedicated to Cash
+  backups.
+- Do not synchronize the live `~/.cash/cash.db` file directly. Google Drive may
+  copy it while SQLite is open or between related writes. Synchronize completed
+  timestamped snapshots instead.
+- Each snapshot should contain:
+  - a SQLite-consistent backup of `cash.db`;
+  - finalized and sent invoice PDFs;
+  - the non-secret configuration needed to understand or restore the data;
+  - a manifest with creation time, schema version, file sizes, and checksums.
+- Keep the live `~/.cash` directory outside Google Drive. Use a flow such as:
+
+  ```text
+  ~/.cash (live)
+      -> local atomic snapshot
+      -> /Users/Shared/CashBackupInbox
+      -> dedicated backup service
+      -> private Google Drive backup folder
+  ```
+
+- Use a separate macOS backup user for cloud delivery. The `sam` development
+  user creates completed backup packages in the shared inbox but does not hold
+  Google credentials.
+- Run the uploader as that backup user using a macOS `launchd` LaunchDaemon, not
+  an interactive Google Drive desktop session or cron job. It should start after
+  reboot, retry failed uploads, and not require the other desktop user to remain
+  logged in.
+- Authenticate the uploader with an OAuth token readable only by the backup
+  user. Prefer a dedicated Google backup account rather than Sam's normal Google
+  account, because uploader tools may receive broad Drive permissions for the
+  authenticated account.
+- Store backups in a single `Cash Backups` folder owned by or shared with the
+  dedicated backup account, and share that folder with Sam's normal email for
+  convenient invoice access.
+- The uploader should accept only expected regular backup files, reject symbolic
+  links, never interpret file contents, verify uploaded sizes or checksums, and
+  archive or mark local packages only after a confirmed upload.
+- Keep OAuth tokens and uploader configuration outside the repository and
+  inaccessible to the `sam` user. Codex should be able to create packages in the
+  handoff inbox but should not be able to read cloud credentials.
+- Encrypt backups before cloud synchronization if they contain customer,
+  banking, tax, or invoice data and the destination is not otherwise considered
+  sufficiently private.
+- Use retention rules rather than overwriting one backup, for example seven
+  daily, five weekly, and twelve monthly snapshots.
+- Add `cash backup verify` and a documented restore command or procedure.
+- Periodically restore the newest backup into a temporary directory and run
+  integrity checks; an untested backup should not be treated as reliable.
+- Later, include Cash in a broader backup policy for Sam's user data, while
+  keeping this application-specific SQLite snapshot step.
 
 ### 3. Make recurring billing safer
 
