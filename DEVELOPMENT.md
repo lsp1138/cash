@@ -48,7 +48,20 @@ confirmation for destructive operations.
 
 - Prevent two active recurring definitions with the same customer, project,
   cadence, period, currency, and amount unless explicitly intended.
-- Provide commands to list, replace, deactivate, and audit recurring charges.
+- Provide CLI commands to manage recurring charges without editing SQLite
+  directly, for example:
+
+  ```sh
+  cash recurring list
+  cash recurring show <id>
+  cash recurring update <id> --service "..." --description "..."
+  cash recurring deactivate <id>
+  cash recurring audit
+  ```
+
+- When a recurring definition is updated, optionally synchronize its existing
+  uninvoiced materialized entries while preserving frozen lines on finalized or
+  historical invoices.
 - Show a confirmation summary before creating an invoice, especially when the
   amount differs from the previous period.
 - Add a dry-run or preview mode that does not modify SQLite or generate final
