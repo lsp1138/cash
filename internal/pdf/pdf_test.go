@@ -47,6 +47,16 @@ func TestBuildTemplateDataGroupsByProject(t *testing.T) {
 	}
 }
 
+func TestInvoiceDateRemainsCreationDateAfterSending(t *testing.T) {
+	createdAt := time.Date(2026, 8, 24, 12, 38, 26, 0, time.UTC)
+	sentAt := time.Date(2026, 9, 9, 15, 10, 15, 0, time.UTC)
+	inv := &models.Invoice{CreatedAt: createdAt, SentAt: &sentAt}
+
+	if got := invoiceDate(inv); !got.Equal(createdAt) {
+		t.Fatalf("expected invoice date %s, got %s", createdAt, got)
+	}
+}
+
 func TestInvoiceTemplateRendersProjectHeadings(t *testing.T) {
 	data := invoiceTemplateData{
 		InvoiceNumber: "INV-2026-001",

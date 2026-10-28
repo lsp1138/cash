@@ -530,11 +530,11 @@ func findBrowser() (string, error) {
 }
 
 func invoiceDate(inv *models.Invoice) time.Time {
-	if inv.SentAt != nil {
-		return *inv.SentAt
-	}
 	if !inv.CreatedAt.IsZero() {
 		return inv.CreatedAt
+	}
+	if inv.SentAt != nil {
+		return *inv.SentAt
 	}
 	return time.Now()
 }
