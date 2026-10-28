@@ -35,6 +35,35 @@ confirmation for destructive operations.
 
 ### 2. Establish automatic backups
 
+Status (2026-10-28): not started, and now urgent because invoices from
+`cash` are sent to clients. Today the only copies are on this Mac:
+`~/.cash/cash.db`, `~/.cash/invoices/`, and manual `.backup` snapshots in
+`~/.cash/backups/` taken before invoice changes. A disk failure or lost Mac
+loses all invoicing history. Finished PDFs currently reach Sam's phone through
+the Claude Code Remote Control session (file sent in chat); that is delivery,
+not backup.
+
+Recommended first version, smallest safe step first:
+
+1. `cash backup`: SQLite `.backup` of the database, copy of `invoices/`,
+   manifest with checksums, packed into one timestamped archive, then
+   encrypted (for example with `age`) before it leaves `~/.cash`. Run it
+   automatically after every invoice mutation as well as on demand.
+2. Write completed archives to `/Users/Shared/CashBackupInbox` (write-only
+   handoff; `sam` never holds cloud credentials).
+3. A separate macOS backup user runs `rclone` from a `launchd` job and copies
+   new archives to Google Drive. Authorize rclone with the `drive.file` scope
+   so it can only see files it created, ideally on a dedicated Google account
+   that shares a `Cash Backups` folder read-only with Sam's main account. That
+   gives Sam a read-only view of backups and invoices from the phone.
+4. Add `cash backup verify` and a tested restore procedure before trusting it.
+
+Open questions: dedicated Google account versus Sam's main one; whether
+finalized invoice PDFs should also be uploaded unencrypted to a separate
+read-only folder for convenient access; retention numbers.
+
+The full design notes follow.
+
 - Use SQLite's backup mechanism rather than copying a database while it may be
   open.
 - Create a timestamped backup before invoice creation, cancellation, migrations,
