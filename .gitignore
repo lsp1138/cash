@@ -4,3 +4,4 @@ cash.exe
 coverage.out
 .gopath/
 .gocache/
+tmp/
