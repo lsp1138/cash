@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -194,5 +196,126 @@ func TestSelectInvoiceEntriesByID(t *testing.T) {
 	}
 	if selected[0].ID != 10 || selected[1].ID != 12 {
 		t.Fatalf("unexpected selected entries: %+v", selected)
+	}
+}
+
+// fakeBrowser writes a shell script that copies the rendered HTML into the
+// requested PDF path, standing in for a Chromium binary.
+func fakeBrowser(t *testing.T) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "browser.sh")
+	body := `#!/bin/sh
+out=""
+src=""
+for arg in "$@"; do
+  case "$arg" in
+    --print-to-pdf=*) out="${arg#--print-to-pdf=}" ;;
+    file://*) src="${arg#file://}" ;;
+  esac
+done
+cp "$src" "$out"
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake browser: %v", err)
+	}
+	return script
+}
+
+func seedDraftInvoice(t *testing.T) string {
+	t.Helper()
+	d, err := db.Open()
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	customerID, err := d.AddCustomer(models.Customer{Name: "Acme Corp", Currency: "EUR", HourlyRate: 100})
+	if err != nil {
+		t.Fatalf("AddCustomer: %v", err)
+	}
+	if _, err := d.AddInvoice(models.Invoice{
+		CustomerID:    customerID,
+		InvoiceNumber: "INV-TEST-001",
+		PeriodStart:   time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+		PeriodEnd:     time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC),
+		TotalAmount:   1000,
+		Currency:      "EUR",
+		Status:        models.InvoiceStatusDraft,
+	}); err != nil {
+		t.Fatalf("AddInvoice: %v", err)
+	}
+	return "INV-TEST-001"
+}
+
+func loadInvoice(t *testing.T, number string) *models.Invoice {
+	t.Helper()
+	d, err := db.Open()
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	inv, err := d.GetInvoiceByNumber(number)
+	if err != nil || inv == nil {
+		t.Fatalf("GetInvoiceByNumber: %v %v", inv, err)
+	}
+	return inv
+}
+
+func TestInvoiceSendPDFErrorLeavesStatusUnchanged(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CASH_PDF_BROWSER", "/definitely/missing-browser")
+	number := seedDraftInvoice(t)
+
+	err := invoiceSendCmd.RunE(invoiceSendCmd, []string{number})
+	if err == nil || !strings.Contains(err.Error(), "generating PDF") {
+		t.Fatalf("expected PDF generation error, got %v", err)
+	}
+	inv := loadInvoice(t, number)
+	if inv.Status != models.InvoiceStatusDraft || inv.SentAt != nil || inv.PDFPath != "" {
+		t.Fatalf("expected untouched draft, got status=%s sentAt=%v pdf=%q", inv.Status, inv.SentAt, inv.PDFPath)
+	}
+}
+
+func TestInvoiceTransitionsRegeneratePDFWithNewStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CASH_PDF_BROWSER", fakeBrowser(t))
+	number := seedDraftInvoice(t)
+
+	expect := func(step, needle string) {
+		t.Helper()
+		inv := loadInvoice(t, number)
+		if inv.PDFPath == "" {
+			t.Fatalf("%s: expected PDF path to be stored", step)
+		}
+		rendered, err := os.ReadFile(inv.PDFPath)
+		if err != nil {
+			t.Fatalf("%s: read PDF: %v", step, err)
+		}
+		if !strings.Contains(string(rendered), needle) {
+			t.Fatalf("%s: rendered PDF does not contain %q", step, needle)
+		}
+	}
+
+	if err := invoiceTaxRefCmd.RunE(invoiceTaxRefCmd, []string{number, "FR TEST/1"}); err != nil {
+		t.Fatalf("tax-ref: %v", err)
+	}
+	expect("tax-ref", "FR TEST/1")
+	if loadInvoice(t, number).Status != models.InvoiceStatusDraft {
+		t.Fatalf("tax-ref must not change status")
+	}
+
+	if err := invoiceSendCmd.RunE(invoiceSendCmd, []string{number}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	expect("send", "<strong>Sent</strong>")
+
+	invPaidAt = "2026-12-01"
+	t.Cleanup(func() { invPaidAt = "" })
+	if err := invoicePaidCmd.RunE(invoicePaidCmd, []string{number}); err != nil {
+		t.Fatalf("paid: %v", err)
+	}
+	expect("paid", "<strong>Paid</strong>")
+	inv := loadInvoice(t, number)
+	if inv.Status != models.InvoiceStatusPaid || inv.PaidAt == nil || inv.PaidAt.Format("2006-01-02") != "2026-12-01" {
+		t.Fatalf("expected paid on 2026-12-01, got status=%s paidAt=%v", inv.Status, inv.PaidAt)
 	}
 }

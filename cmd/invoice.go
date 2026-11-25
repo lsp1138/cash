@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -252,7 +253,7 @@ var invoicePDFCmd = &cobra.Command{
 
 var invoiceTaxRefCmd = &cobra.Command{
 	Use:   "tax-ref <invoice-number> <reference>",
-	Short: "Set the Portuguese tax-system reference number for an invoice",
+	Short: "Set the Portuguese tax-system reference for an invoice and regenerate its PDF",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		d, err := db.Open()
@@ -268,17 +269,26 @@ var invoiceTaxRefCmd = &cobra.Command{
 		if inv == nil {
 			return fmt.Errorf("invoice %q not found", args[0])
 		}
+		inv.TaxReference = args[1]
+		pdfPath, err := renderInvoicePDF(inv)
+		if err != nil {
+			return fmt.Errorf("generating PDF: %w (tax reference not changed)", err)
+		}
 		if err := d.UpdateInvoiceTaxReference(inv.ID, args[1]); err != nil {
 			return err
 		}
+		if err := d.UpdateInvoicePDFPath(inv.ID, pdfPath); err != nil {
+			return err
+		}
 		fmt.Printf("Invoice tax reference set  →  %s  (%s)\n", inv.InvoiceNumber, args[1])
+		fmt.Printf("Invoice PDF written  →  %s\n", pdfPath)
 		return nil
 	},
 }
 
 var invoiceSendCmd = &cobra.Command{
 	Use:   "send <invoice-number>",
-	Short: "Mark an invoice as sent",
+	Short: "Mark an invoice as sent and regenerate its PDF",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return transitionInvoice(args[0], func(inv *models.Invoice) error {
@@ -292,7 +302,7 @@ var invoiceSendCmd = &cobra.Command{
 
 var invoicePaidCmd = &cobra.Command{
 	Use:   "paid <invoice-number>",
-	Short: "Mark an invoice as paid",
+	Short: "Mark an invoice as paid and regenerate its PDF",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		paidAt := time.Now()
@@ -320,41 +330,25 @@ var invoicePaidCmd = &cobra.Command{
 
 var invoiceCancelCmd = &cobra.Command{
 	Use:   "cancel <invoice-number>",
-	Short: "Cancel an invoice and release its billable entries",
+	Short: "Cancel an invoice, release its billable entries, and regenerate its PDF",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		d, err := db.Open()
-		if err != nil {
-			return err
-		}
-		defer d.Close()
-
-		inv, err := d.GetInvoiceByNumber(args[0])
-		if err != nil {
-			return err
-		}
-		if inv == nil {
-			return fmt.Errorf("invoice %q not found", args[0])
-		}
-		switch inv.Status {
-		case models.InvoiceStatusDraft, models.InvoiceStatusSent:
-		case models.InvoiceStatusCancelled:
-			fmt.Printf("Invoice already cancelled  →  %s\n", inv.InvoiceNumber)
-			return nil
-		case models.InvoiceStatusPaid:
-			return fmt.Errorf("paid invoices cannot be cancelled")
-		default:
-			return fmt.Errorf("unsupported invoice status %q", inv.Status)
-		}
-
-		if err := d.CancelInvoice(inv.ID, time.Now()); err != nil {
-			return err
-		}
-
-		fmt.Printf("Invoice cancelled  →  %s\n", inv.InvoiceNumber)
-		return nil
+		return transitionInvoice(args[0], func(inv *models.Invoice) error {
+			switch inv.Status {
+			case models.InvoiceStatusDraft, models.InvoiceStatusSent:
+				return nil
+			case models.InvoiceStatusCancelled:
+				return errInvoiceAlreadyCancelled
+			case models.InvoiceStatusPaid:
+				return fmt.Errorf("paid invoices cannot be cancelled")
+			default:
+				return fmt.Errorf("unsupported invoice status %q", inv.Status)
+			}
+		}, models.InvoiceStatusCancelled, time.Now(), "Invoice cancelled  →  %s\n")
 	},
 }
+
+var errInvoiceAlreadyCancelled = errors.New("invoice already cancelled")
 
 // ── invoice list ──────────────────────────────────────────────────────────────
 
@@ -718,12 +712,50 @@ func transitionInvoice(number string, validate func(*models.Invoice) error, next
 		return fmt.Errorf("invoice %q not found", number)
 	}
 	if err := validate(inv); err != nil {
+		if errors.Is(err, errInvoiceAlreadyCancelled) {
+			fmt.Printf("Invoice already cancelled  →  %s\n", inv.InvoiceNumber)
+			return nil
+		}
 		return err
 	}
-	if err := d.UpdateInvoiceStatus(inv.ID, nextStatus, changedAt); err != nil {
+
+	// Render the PDF for the new status first so a rendering failure leaves
+	// the database untouched and the stored PDF never shows a stale status.
+	applyInvoiceTransition(inv, nextStatus, changedAt)
+	pdfPath, err := renderInvoicePDF(inv)
+	if err != nil {
+		return fmt.Errorf("generating PDF: %w (status not changed)", err)
+	}
+	if nextStatus == models.InvoiceStatusCancelled {
+		err = d.CancelInvoice(inv.ID, changedAt)
+	} else {
+		err = d.UpdateInvoiceStatus(inv.ID, nextStatus, changedAt)
+	}
+	if err != nil {
+		return err
+	}
+	if err := d.UpdateInvoicePDFPath(inv.ID, pdfPath); err != nil {
 		return err
 	}
 
 	fmt.Printf(successFormat, inv.InvoiceNumber)
+	fmt.Printf("Invoice PDF written  →  %s\n", pdfPath)
 	return nil
+}
+
+// applyInvoiceTransition mirrors UpdateInvoiceStatus on the in-memory invoice
+// so the PDF can be rendered before the change is committed.
+func applyInvoiceTransition(inv *models.Invoice, nextStatus string, changedAt time.Time) {
+	inv.Status = nextStatus
+	at := changedAt
+	switch nextStatus {
+	case models.InvoiceStatusDraft:
+		inv.SentAt, inv.PaidAt, inv.CancelledAt = nil, nil, nil
+	case models.InvoiceStatusSent:
+		inv.SentAt, inv.CancelledAt = &at, nil
+	case models.InvoiceStatusPaid:
+		inv.PaidAt, inv.CancelledAt = &at, nil
+	case models.InvoiceStatusCancelled:
+		inv.CancelledAt = &at
+	}
 }

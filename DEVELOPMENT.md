@@ -147,6 +147,15 @@ The full design notes follow.
 
 ### 4. Improve invoice workflow
 
+Done (2026-11-25): `invoice tax-ref`, `send`, `paid`, and `cancel` now render
+the PDF for the new state before committing the change, so the stored PDF can
+never show a stale status or a missing tax reference. A rendering failure
+leaves the database untouched. This followed INV-2026-007 going out with a
+PDF that still read "Draft" because the PDF had been regenerated before the
+send step.
+
+Remaining:
+
 - Allow the tax reference to be supplied during invoice generation so the first
   PDF is complete.
 - Add an explicit finalize/send workflow and preserve the exact finalized PDF.
